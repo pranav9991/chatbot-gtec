@@ -5,3 +5,143 @@ transformers==4.44.2
 langchain-community==0.2.12
 sentence-transformers
 faiss-cpu
+import PyPDF2
+import faiss
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
+import os
+import speech_recognition as sr
+from gtts import gTTS
+from google.generativeai import configure, GenerativeModel
+
+# Initialize TF-IDF Vectorizer
+tfidf_vectorizer = TfidfVectorizer(max_features=384)  # Limit to 384 features for consistency with previous embedding dimension
+
+# In-memory storage for document chunks
+document_store = []
+
+# Initialize FAISS index (using L2 distance for TF-IDF vectors)
+embedding_dimension = 384  # Dimension aligned with max_features of TfidfVectorizer
+index = faiss.IndexFlatL2(embedding_dimension)
+
+# Function to extract text from PDF
+def extract_pdf_text(pdf_path):
+    with open(pdf_path, 'rb') as file:
+        reader = PyPDF2.PdfReader(file)
+        text = ""
+        for page_num in range(len(reader.pages)):
+            page = reader.pages[page_num]
+            text += page.extract_text() or ""  # Handle cases where extract_text returns None
+    return text
+
+# Store PDF text in FAISS
+def store_pdf_in_db(pdf_path):
+    pdf_text = extract_pdf_text(pdf_path)
+    chunks = [pdf_text[i:i + 512] for i in range(0, len(pdf_text), 512)]  # Break into smaller chunks
+
+    # Encode chunks into TF-IDF vectors
+    embeddings = tfidf_vectorizer.fit_transform(chunks).toarray()
+    document_store.extend(chunks)  # Store the chunks in memory
+
+    # Add embeddings to FAISS index
+    if embeddings.shape[1] == embedding_dimension:
+        index.add(np.array(embeddings, dtype=np.float32))
+    else:
+        # Pad or truncate embeddings to match the expected dimension
+        padded_embeddings = np.zeros((len(chunks), embedding_dimension), dtype=np.float32)
+        for i, emb in enumerate(embeddings):
+            padded_embeddings[i, :min(embedding_dimension, emb.shape[0])] = emb[:embedding_dimension]
+        index.add(padded_embeddings)
+
+# Retrieve relevant chunks based on the query
+def retrieve_documents_from_pdf(query, n_results=3):
+    # Encode query into TF-IDF vector
+    query_embedding = tfidf_vectorizer.transform([query]).toarray()
+
+    # Ensure the embedding dimension matches
+    if query_embedding.shape[1] != embedding_dimension:
+        padded_query = np.zeros((1, embedding_dimension), dtype=np.float32)
+        padded_query[0, :min(embedding_dimension, query_embedding.shape[1])] = query_embedding[0]
+        query_embedding = padded_query
+    else:
+        query_embedding = np.array(query_embedding, dtype=np.float32)
+
+    # Ensure the FAISS index has data
+    if index.ntotal > 0:
+        # Search for similar embeddings in FAISS
+        distances, indices = index.search(query_embedding, n_results)
+
+        # Fetch the top matching chunks from the document store
+        retrieved_docs = [document_store[idx] for idx in indices[0] if idx < len(document_store)]
+        return retrieved_docs
+    else:
+        return ["No data available in FAISS index."]
+
+# LLM model function (Gemini LLM)
+def llm_model_object(user_text):
+    try:
+        # Retrieve relevant content from the PDF
+        retrieved_docs = retrieve_documents_from_pdf(user_text)
+        
+        # Flatten the retrieved_docs list if needed
+        retrieved_context = " ".join(
+            [" ".join(doc) if isinstance(doc, list) else doc for doc in retrieved_docs]
+        )
+
+        # Combine the user query with the retrieved context
+        combined_input = f"Context: {retrieved_context}\n\nUser Query: {user_text}"
+
+        # Configure and use Gemini LLM
+        configure(api_key=os.getenv("GOOGLE_API_KEY"))
+        model = GenerativeModel('gemini-pro')
+
+        # Generate a response
+        response = model.generate_content(combined_input)
+        return response.text
+    except Exception as e:
+        print(f"Error generating LLM response: {e}")
+        return "Sorry, there was an error processing your request."
+
+# Voice input function
+def voice_input():
+    r = sr.Recognizer()
+    
+    with sr.Microphone() as source:
+        print("Listening...")
+        audio = r.listen(source)
+    
+    try:
+        text = r.recognize_google(audio)
+        print("You said: ", text)
+        return text
+    except sr.UnknownValueError:
+        print("Sorry, could not understand the audio.")
+        return None
+    except sr.RequestError as e:
+        print(f"Could not request results from Google Speech Recognition service: {e}")
+        return None
+
+# Text-to-speech function
+def text_to_speech(text):
+    tts = gTTS(text=text, lang="en")
+    tts.save("response.mp3")
+    print("Response saved as response.mp3")
+
+# Main function
+def main():
+    # Get voice input
+    user_text = voice_input()
+
+    # Generate LLM response with RAG
+    if user_text:
+        response = llm_model_object(user_text)
+        print("AI Response: ", response)
+
+        # Convert AI response to speech
+        text_to_speech(response)
+
+        # Play the audio response
+        os.system("start response.mp3")  # On Windows; use 'open' for macOS, 'xdg-open' for Linux
+
+if __name__ == "__main__":
+    main()
