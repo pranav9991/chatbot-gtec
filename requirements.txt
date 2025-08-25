@@ -161,36 +161,51 @@ def main():
         store_pdf_in_db("uploaded_file.pdf")
         st.success("PDF successfully uploaded and stored!")
 
-    st.write("Press the button below to start speaking. The assistant will listen to your voice input, process it, and generate a response.")
-    
-    if st.button("Ask Me Anything"):
+    st.write("Choose how you'd like to provide your input: type your query below or use voice input by clicking the button.")
+
+    # Text input field
+    user_text_input = st.text_input("Enter your query here:", placeholder="Type your question...")
+
+    # Voice input button
+    st.write("Or press the button below to start speaking:")
+    voice_button = st.button("Ask Me Anything (Voice)")
+
+    # Process input (text or voice)
+    user_text = None
+    if user_text_input:
+        user_text = user_text_input
+        st.write(f"Text Input: {user_text}")
+    elif voice_button:
         with st.spinner("Listening..."):
             user_text = voice_input()
-
             if user_text:
-                response = llm_model_object(user_text)
-                
-                # Generate the speech from the response
-                text_to_speech(response)
-                
-                # Open the correct audio file (response.mp3)
-                audio_file = open("response.mp3", "rb")
-                audio_bytes = audio_file.read()
-                audio_file.close()
+                st.write(f"Voice Input: {user_text}")
 
-                # Display the response text and audio
-                st.text_area(label="Response:", value=response, height=350)
-                st.audio(audio_bytes)
+    if user_text:
+        with st.spinner("Processing your query..."):
+            response = llm_model_object(user_text)
+            
+            # Generate the speech from the response
+            text_to_speech(response)
+            
+            # Open the correct audio file (response.mp3)
+            audio_file = open("response.mp3", "rb")
+            audio_bytes = audio_file.read()
+            audio_file.close()
 
-                # Add a download button for the audio file
-                st.download_button(
-                    label="Download Speech",
-                    data=audio_bytes,
-                    file_name="response.mp3",  # Ensure the correct file name here
-                    mime="audio/mp3"
-                )
-            else:
-                st.error("No audio detected. Please try again.")
+            # Display the response text and audio
+            st.text_area(label="Response:", value=response, height=350)
+            st.audio(audio_bytes)
+
+            # Add a download button for the audio file
+            st.download_button(
+                label="Download Speech",
+                data=audio_bytes,
+                file_name="response.mp3",
+                mime="audio/mp3"
+            )
+    elif voice_button and not user_text:
+        st.error("No audio detected. Please try again or type your query.")
 
 if __name__ == "__main__":
     main()
