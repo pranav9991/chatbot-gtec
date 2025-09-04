@@ -1,211 +1,172 @@
-streamlit==1.28.2
-pandas==2.1.3
-langchain==0.2.14
-transformers==4.44.2
-langchain-community==0.2.12
-sentence-transformers
-faiss-cpu
-import PyPDF2
-import faiss
+import torch
 import numpy as np
-from sklearn.feature_extraction.text import TfidfVectorizer
-import os
-import speech_recognition as sr
-from gtts import gTTS
-from google.generativeai import configure, GenerativeModel
-
-# Initialize TF-IDF Vectorizer
-tfidf_vectorizer = TfidfVectorizer(max_features=384)  # Limit to 384 features for consistency with previous embedding dimension
-
-# In-memory storage for document chunks
-document_store = []
-
-# Initialize FAISS index (using L2 distance for TF-IDF vectors)
-embedding_dimension = 384  # Dimension aligned with max_features of TfidfVectorizer
-index = faiss.IndexFlatL2(embedding_dimension)
-
-# Function to extract text from PDF
-def extract_pdf_text(pdf_path):
-    with open(pdf_path, 'rb') as file:
-        reader = PyPDF2.PdfReader(file)
-        text = ""
-        for page_num in range(len(reader.pages)):
-            page = reader.pages[page_num]
-            text += page.extract_text() or ""  # Handle cases where extract_text returns None
-    return text
-
-# Store PDF text in FAISS
-def store_pdf_in_db(pdf_path):
-    pdf_text = extract_pdf_text(pdf_path)
-    chunks = [pdf_text[i:i + 512] for i in range(0, len(pdf_text), 512)]  # Break into smaller chunks
-
-    # Encode chunks into TF-IDF vectors
-    embeddings = tfidf_vectorizer.fit_transform(chunks).toarray()
-    document_store.extend(chunks)  # Store the chunks in memory
-
-    # Add embeddings to FAISS index
-    if embeddings.shape[1] == embedding_dimension:
-        index.add(np.array(embeddings, dtype=np.float32))
-    else:
-        # Pad or truncate embeddings to match the expected dimension
-        padded_embeddings = np.zeros((len(chunks), embedding_dimension), dtype=np.float32)
-        for i, emb in enumerate(embeddings):
-            padded_embeddings[i, :min(embedding_dimension, emb.shape[0])] = emb[:embedding_dimension]
-        index.add(padded_embeddings)
-
-# Retrieve relevant chunks based on the query
-def retrieve_documents_from_pdf(query, n_results=3):
-    # Encode query into TF-IDF vector
-    query_embedding = tfidf_vectorizer.transform([query]).toarray()
-
-    # Ensure the embedding dimension matches
-    if query_embedding.shape[1] != embedding_dimension:
-        padded_query = np.zeros((1, embedding_dimension), dtype=np.float32)
-        padded_query[0, :min(embedding_dimension, query_embedding.shape[1])] = query_embedding[0]
-        query_embedding = padded_query
-    else:
-        query_embedding = np.array(query_embedding, dtype=np.float32)
-
-    # Ensure the FAISS index has data
-    if index.ntotal > 0:
-        # Search for similar embeddings in FAISS
-        distances, indices = index.search(query_embedding, n_results)
-
-        # Fetch the top matching chunks from the document store
-        retrieved_docs = [document_store[idx] for idx in indices[0] if idx < len(document_store)]
-        return retrieved_docs
-    else:
-        return ["No data available in FAISS index."]
-
-# LLM model function (Gemini LLM)
-def llm_model_object(user_text):
-    try:
-        # Retrieve relevant content from the PDF
-        retrieved_docs = retrieve_documents_from_pdf(user_text)
-        
-        # Flatten the retrieved_docs list if needed
-        retrieved_context = " ".join(
-            [" ".join(doc) if isinstance(doc, list) else doc for doc in retrieved_docs]
-        )
-
-        # Combine the user query with the retrieved context
-        combined_input = f"Context: {retrieved_context}\n\nUser Query: {user_text}"
-
-        # Configure and use Gemini LLM
-        configure(api_key=os.getenv("GOOGLE_API_KEY"))
-        model = GenerativeModel('gemini-pro')
-
-        # Generate a response
-        response = model.generate_content(combined_input)
-        return response.text
-    except Exception as e:
-        print(f"Error generating LLM response: {e}")
-        return "Sorry, there was an error processing your request."
-
-# Voice input function
-def voice_input():
-    r = sr.Recognizer()
-    
-    with sr.Microphone() as source:
-        print("Listening...")
-        audio = r.listen(source)
-    
-    try:
-        text = r.recognize_google(audio)
-        print("You said: ", text)
-        return text
-    except sr.UnknownValueError:
-        print("Sorry, could not understand the audio.")
-        return None
-    except sr.RequestError as e:
-        print(f"Could not request results from Google Speech Recognition service: {e}")
-        return None
-
-# Text-to-speech function
-def text_to_speech(text):
-    tts = gTTS(text=text, lang="en")
-    tts.save("response.mp3")
-    print("Response saved as response.mp3")
-
-# Main function
-def main():
-    # Get voice input
-    user_text = voice_input()
-
-    # Generate LLM response with RAG
-    if user_text:
-        response = llm_model_object(user_text)
-        print("AI Response: ", response)
-
-        # Convert AI response to speech
-        text_to_speech(response)
-
-        # Play the audio response
-        os.system("start response.mp3")  # On Windows; use 'open' for macOS, 'xdg-open' for Linux
-
-if __name__ == "__main__":
-    main()
-import streamlit as st
-from helper import voice_input, llm_model_object, text_to_speech, store_pdf_in_db
+from torch import nn
+from torch.utils.data import DataLoader, TensorDataset
+from transformers import BertTokenizer, BertModel, AdamW
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import f1_score, mean_squared_error
+from sklearn.preprocessing import LabelEncoder
+import pandas as pd
 
 def main():
-    st.title("Multilingual AI Assistant 🤖")
-    st.write("Upload Your PDF File!!")
+    """
+    Task B: Property Claim Modeling with Wisconsin LGPIF Dataset
+    Implements a multi-task BERT model for:
+    - B1: Hazard classification (9 classes: Vandalism, Fire, Lightning, Wind, Hail, Vehicle, WaterNW, WaterW, Misc)
+    - B2: Log claim amount regression
+    Dataset: peril.training.csv (~4,991 rows, one-hot encoded hazards, Loss, Description)
+    For full dataset (~6,030 rows), download from:
+    https://raw.githubusercontent.com/OpenActTexts/Loss-Data-Analytics/master/Data/PropertyFundInsample.csv
+    """
 
-    uploaded_file = st.file_uploader("Choose File", type="pdf")
+    # Initialize tokenizer
+    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')  # English for LGPIF
 
-    if uploaded_file is not None:
-        with open("uploaded_file.pdf", "wb") as f:
-            f.write(uploaded_file.read())
+    # Load dataset
+    try:
+        df = pd.read_csv('peril.training.csv')  # Ensure file is in the same directory
+    except FileNotFoundError:
+        print("Error: 'peril.training.csv' not found. Please save the dataset in the same directory.")
+        return
 
-        store_pdf_in_db("uploaded_file.pdf")
-        st.success("PDF successfully uploaded and stored!")
+    # Extract hazard labels from one-hot columns
+    hazard_columns = ['Vandalism', 'Fire', 'Lightning', 'Wind', 'Hail', 'Vehicle', 'WaterNW', 'WaterW', 'Misc']
+    df['hazard_label'] = df[hazard_columns].idxmax(axis=1)
+    label_encoder = LabelEncoder()
+    df['hazard_label'] = label_encoder.fit_transform(df[hazard_columns].idxmax(axis=1))
 
-    st.write("Choose how you'd like to provide your input: type your query below or use voice input by clicking the button.")
+    # Log-transform claim amount
+    df['log_claim_amount'] = np.log1p(df['Loss'])
 
-    # Text input field
-    user_text_input = st.text_input("Enter your query here:", placeholder="Type your question...")
+    # Prepare data
+    X = df['Description']
+    y_class = df['hazard_label']
+    y_reg = df['log_claim_amount']
 
-    # Voice input button
-    st.write("Or press the button below to start speaking:")
-    voice_button = st.button("Ask Me Anything (Voice)")
+    # Split into train/test (80/20)
+    X_train, X_test, y_class_train, y_class_test, y_reg_train, y_reg_test = train_test_split(
+        X, y_class, y_reg, test_size=0.2, random_state=42
+    )
 
-    # Process input (text or voice)
-    user_text = None
-    if user_text_input:
-        user_text = user_text_input
-        st.write(f"Text Input: {user_text}")
-    elif voice_button:
-        with st.spinner("Listening..."):
-            user_text = voice_input()
-            if user_text:
-                st.write(f"Voice Input: {user_text}")
+    # Tokenize function
+    def tokenize_texts(texts):
+        return tokenizer(texts.tolist(), padding=True, truncation=True, max_length=128, return_tensors='pt')
 
-    if user_text:
-        with st.spinner("Processing your query..."):
-            response = llm_model_object(user_text)
-            
-            # Generate the speech from the response
-            text_to_speech(response)
-            
-            # Open the correct audio file (response.mp3)
-            audio_file = open("response.mp3", "rb")
-            audio_bytes = audio_file.read()
-            audio_file.close()
+    # Tokenize train and test sets
+    train_encodings = tokenize_texts(X_train)
+    test_encodings = tokenize_texts(X_test)
 
-            # Display the response text and audio
-            st.text_area(label="Response:", value=response, height=350)
-            st.audio(audio_bytes)
+    # Create datasets
+    train_dataset = TensorDataset(
+        train_encodings['input_ids'],
+        train_encodings['attention_mask'],
+        torch.tensor(y_class_train.values, dtype=torch.long),
+        torch.tensor(y_reg_train.values, dtype=torch.float)
+    )
+    test_dataset = TensorDataset(
+        test_encodings['input_ids'],
+        test_encodings['attention_mask'],
+        torch.tensor(y_class_test.values, dtype=torch.long),
+        torch.tensor(y_reg_test.values, dtype=torch.float)
+    )
 
-            # Add a download button for the audio file
-            st.download_button(
-                label="Download Speech",
-                data=audio_bytes,
-                file_name="response.mp3",
-                mime="audio/mp3"
-            )
-    elif voice_button and not user_text:
-        st.error("No audio detected. Please try again or type your query.")
+    # Create data loaders
+    train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=16)
+
+    # Define multi-task model
+    class BertMultiTask(nn.Module):
+        def __init__(self, num_classes=9):
+            super(BertMultiTask, self).__init__()
+            self.bert = BertModel.from_pretrained('bert-base-uncased')
+            self.classifier = nn.Linear(self.bert.config.hidden_size, num_classes)  # Hazard classification
+            self.regressor = nn.Linear(self.bert.config.hidden_size, 1)  # Claim amount regression
+
+        def forward(self, input_ids, attention_mask):
+            outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+            pooled_output = outputs.pooler_output
+            class_logits = self.classifier(pooled_output)
+            reg_output = self.regressor(pooled_output)
+            return class_logits, reg_output
+
+    # Initialize model
+    model = BertMultiTask(num_classes=len(label_encoder.classes_))
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.to(device)
+
+    # Optimizer and loss functions
+    optimizer = AdamW(model.parameters(), lr=2e-5)
+    class_loss_fn = nn.CrossEntropyLoss()
+    reg_loss_fn = nn.MSELoss()
+
+    # Training loop
+    print("Training model...")
+    for epoch in range(5):
+        model.train()
+        total_class_loss, total_reg_loss = 0, 0
+        for batch in train_loader:
+            input_ids, attention_mask, class_labels, reg_labels = [b.to(device) for b in batch]
+            optimizer.zero_grad()
+            class_logits, reg_output = model(input_ids, attention_mask)
+            class_loss = class_loss_fn(class_logits, class_labels)
+            reg_loss = reg_loss_fn(reg_output.squeeze(), reg_labels)
+            loss = class_loss + reg_loss  # Equal weighting
+            loss.backward()
+            optimizer.step()
+            total_class_loss += class_loss.item()
+            total_reg_loss += reg_loss.item()
+        print(f'Epoch {epoch+1}, Class Loss: {total_class_loss / len(train_loader):.4f}, Reg Loss: {total_reg_loss / len(train_loader):.4f}')
+
+    # Evaluation
+    print("\nEvaluating model...")
+    model.eval()
+    class_preds, reg_preds = [], []
+    true_class, true_reg = [], []
+    with torch.no_grad():
+        for batch in test_loader:
+            input_ids, attention_mask, class_labels, reg_labels = [b.to(device) for b in batch]
+            class_logits, reg_output = model(input_ids, attention_mask)
+            class_preds.extend(torch.argmax(class_logits, dim=1).cpu().numpy())
+            reg_preds.extend(reg_output.squeeze().cpu().numpy())
+            true_class.extend(class_labels.cpu().numpy())
+            true_reg.extend(reg_labels.cpu().numpy())
+
+    # Compute metrics
+    f1 = f1_score(true_class, class_preds, average='weighted')
+    rmse = np.sqrt(mean_squared_error(true_reg, reg_preds))
+    print(f'B1 Test F1-Score (Hazard): {f1:.4f}')
+    print(f'B2 Test RMSE (Log Claim Amount): {rmse:.4f}')
+
+    # Inference function
+    def predict(description):
+        model.eval()
+        inputs = tokenizer(description, padding=True, truncation=True, max_length=128, return_tensors='pt').to(device)
+        with torch.no_grad():
+            class_logits, reg_output = model(inputs['input_ids'], inputs['attention_mask'])
+        hazard = label_encoder.inverse_transform([torch.argmax(class_logits, dim=1).cpu().numpy()[0]])[0]
+        claim_amount = np.expm1(reg_output.squeeze().cpu().numpy())  # Reverse log-transform
+        return hazard, claim_amount
+
+    # Example inference
+    print("\nExample prediction:")
+    description = "lightning damage to courthouse"
+    hazard, claim_amount = predict(description)
+    print(f'Predicted Hazard: {hazard}, Predicted Claim Amount: ${claim_amount:.2f}')
+
+    # Notes for improvement
+    print("\nNotes for improvement:")
+    print("- Use full LGPIF dataset (~6,030 rows) for better results: https://raw.githubusercontent.com/OpenActTexts/Loss-Data-Analytics/master/Data/PropertyFundInsample.csv")
+    print("- Handle class imbalance with weighted loss:")
+    print("  class_counts = df[hazard_columns].sum()")
+    print("  class_weights = 1 / class_counts")
+    print("  class_weights = torch.tensor(class_weights.values, dtype=torch.float).to(device)")
+    print("  class_loss_fn = nn.CrossEntropyLoss(weight=class_weights)")
+    print("- Tune hyperparameters (learning rate, batch size, epochs) with Hugging Face Trainer.")
+    print("- Add validation set (e.g., peril.validation.csv) for robust evaluation.")
+    print("- Use distilbert-base-uncased or freeze BERT layers for faster training:")
+    print("  for param in model.bert.encoder.layer[:6].parameters():")
+    print("      param.requires_grad = False")
+    print("- Save model for deployment: torch.save(model.state_dict(), 'model.pt')")
 
 if __name__ == "__main__":
     main()
