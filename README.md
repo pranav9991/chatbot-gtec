@@ -1,1 +1,2 @@
 # chatbot-gtec
+AIzaSyBAYQzDbnIIvHs_wostIIhWkuTERtARQLI
