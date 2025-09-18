@@ -1,76 +1,83 @@
-import cv2
-import numpy as np
 import streamlit as st
+import cv2
+import dlib
+import numpy as np
 from PIL import Image
+from tensorflow.keras.applications import VGG16
+from tensorflow.keras.applications.vgg16 import preprocess_input
+from tensorflow.keras.preprocessing.image import img_to_array
 
-# Load models
-faceProto = "opencv_face_detector.pbtxt"
-faceModel = "opencv_face_detector_uint8.pb"
-ageProto = "age_deploy.prototxt"
-ageModel = "age_net.caffemodel"
-genderProto = "gender_deploy.prototxt"
-genderModel = "gender_net.caffemodel"
+# Initialize models
+face_detector = dlib.get_frontal_face_detector()
+landmark_predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
+vgg = VGG16(weights="imagenet", include_top=False, pooling="avg")
 
-MODEL_MEAN_VALUES = (78.4263377603, 87.7689143744, 114.895847746)
-ageList = ['(0-2)', '(4-6)', '(8-12)', '(15-20)',
-           '(25-32)', '(38-43)', '(48-53)', '(60-100)']
-genderList = ['Male','Female']
+# Helper: extract face landmarks
+def get_landmarks(img_gray):
+    faces = face_detector(img_gray)
+    if len(faces) == 0:
+        return None, None
+    shape = landmark_predictor(img_gray, faces[0])
+    coords = np.array([[p.x, p.y] for p in shape.parts()])
+    return faces[0], coords
 
-faceNet = cv2.dnn.readNet(faceModel, faceProto)
-ageNet = cv2.dnn.readNet(ageModel, ageProto)
-genderNet = cv2.dnn.readNet(genderModel, genderProto)
+# Helper: crop region by landmark indexes
+def crop_region(image, landmarks, idx_list, pad=5):
+    pts = landmarks[idx_list]
+    x1, y1 = np.min(pts, axis=0) - pad
+    x2, y2 = np.max(pts, axis=0) + pad
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(image.shape[1], x2), min(image.shape[0], y2)
+    return image[int(y1):int(y2), int(x1):int(x2)]
 
-# Helper: detect faces
-def highlightFace(net, frame, conf_threshold=0.7):
-    frameOpencvDnn = frame.copy()
-    h, w = frameOpencvDnn.shape[:2]
-    blob = cv2.dnn.blobFromImage(frameOpencvDnn, 1.0, (300, 300),
-                                 [104, 117, 123], True, False)
-    net.setInput(blob)
-    detections = net.forward()
-    faceBoxes = []
-    for i in range(detections.shape[2]):
-        confidence = detections[0,0,i,2]
-        if confidence > conf_threshold:
-            x1 = int(detections[0,0,i,3]*w)
-            y1 = int(detections[0,0,i,4]*h)
-            x2 = int(detections[0,0,i,5]*w)
-            y2 = int(detections[0,0,i,6]*h)
-            faceBoxes.append([x1,y1,x2,y2])
-            cv2.rectangle(frameOpencvDnn, (x1,y1), (x2,y2),
-                          (0,255,0), int(round(h/150)), 8)
-    return frameOpencvDnn, faceBoxes
+# Helper: get VGG16 feature vector (not used yet but ready)
+def extract_features(crop):
+    crop_resized = cv2.resize(crop, (224, 224))
+    x = img_to_array(crop_resized)
+    x = np.expand_dims(x, axis=0)
+    x = preprocess_input(x)
+    features = vgg.predict(x, verbose=0)
+    return features.flatten()
+
+# Heuristic behaviour detection
+def detect_behaviour(eye_img, lip_img):
+    # Eye darkness heuristic
+    eye_gray = cv2.cvtColor(eye_img, cv2.COLOR_BGR2GRAY)
+    eye_darkness = np.mean(eye_gray)
+
+    # Lip darkness heuristic (lower brightness = darker lips)
+    lip_hsv = cv2.cvtColor(lip_img, cv2.COLOR_BGR2HSV)
+    lip_brightness = np.mean(lip_hsv[:, :, 2])
+
+    if lip_brightness < 60:  # Threshold for dark lips
+        return "Dark Lips Detected"
+    elif eye_darkness < 60:  # Threshold for dark under eyes
+        return "Eye Rubbing Detected"
+    else:
+        return "No clear behaviour detected"
 
 # Streamlit UI
-st.title("🧠 Age & Gender Detection")
-uploaded_file = st.file_uploader("Upload an Image", type=["jpg","jpeg","png"])
+st.title("Facial Behaviour Detection (Dark Lips / Eye Rubbing)")
+uploaded = st.file_uploader("Upload a face image", type=["jpg", "jpeg", "png"])
 
-if uploaded_file is not None:
-    image = Image.open(uploaded_file).convert('RGB')
-    frame = np.array(image)
-    resultImg, faceBoxes = highlightFace(faceNet, frame)
+if uploaded:
+    image = Image.open(uploaded).convert("RGB")
+    image_np = np.array(image)
+    img_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+    img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
 
-    if not faceBoxes:
-        st.warning("No face detected.")
+    face, landmarks = get_landmarks(img_gray)
+    if landmarks is None:
+        st.error("No face detected.")
     else:
-        padding = 20
-        for faceBox in faceBoxes:
-            face = frame[max(0,faceBox[1]-padding):min(faceBox[3]+padding,frame.shape[0]-1),
-                         max(0,faceBox[0]-padding):min(faceBox[2]+padding, frame.shape[1]-1)]
+        # Landmark indexes: lips (48-67), eyes (36-47)
+        lips = crop_region(img_bgr, landmarks, list(range(48, 68)))
+        eyes = crop_region(img_bgr, landmarks, list(range(36, 48)))
 
-            blob = cv2.dnn.blobFromImage(face, 1.0, (227,227),
-                                         MODEL_MEAN_VALUES, swapRB=False)
+        behaviour = detect_behaviour(eyes, lips)
 
-            genderNet.setInput(blob)
-            genderPreds = genderNet.forward()
-            gender = genderList[genderPreds[0].argmax()]
+        st.image(image, caption="Uploaded Image", use_container_width=True)
+        st.subheader(f"Detected Behaviour: {behaviour}")
 
-            ageNet.setInput(blob)
-            agePreds = ageNet.forward()
-            age = ageList[agePreds[0].argmax()]
 
-            label = f"{gender}, {age}"
-            cv2.putText(resultImg, label, (faceBox[0], faceBox[1]-10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,255), 2, cv2.LINE_AA)
-
-        st.image(resultImg, channels="BGR", caption="Predicted Age and Gender")
+pip install streamlit opencv-python dlib pillow tensorflow
