@@ -1,114 +1,76 @@
-
-
-import streamlit as st
 import cv2
 import numpy as np
+import streamlit as st
 from PIL import Image
-from mtcnn import MTCNN
-import mediapipe as mp
-from deepface import DeepFace
-import insightface
 
-# ---------- Face Detection Methods ----------
-def detect_faces_opencv(img):
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-    faces = cascade.detectMultiScale(gray, 1.1, 4)
-    return [(x, y, x+w, y+h) for (x, y, w, h) in faces]
+# Load models
+faceProto = "opencv_face_detector.pbtxt"
+faceModel = "opencv_face_detector_uint8.pb"
+ageProto = "age_deploy.prototxt"
+ageModel = "age_net.caffemodel"
+genderProto = "gender_deploy.prototxt"
+genderModel = "gender_net.caffemodel"
 
-def detect_faces_mtcnn(img):
-    detector = MTCNN()
-    results = detector.detect_faces(img)
-    faces = []
-    for r in results:
-        x, y, w, h = r['box']
-        faces.append((x, y, x+w, y+h))
-    return faces
+MODEL_MEAN_VALUES = (78.4263377603, 87.7689143744, 114.895847746)
+ageList = ['(0-2)', '(4-6)', '(8-12)', '(15-20)',
+           '(25-32)', '(38-43)', '(48-53)', '(60-100)']
+genderList = ['Male','Female']
 
-def detect_faces_mediapipe(img):
-    mp_face = mp.solutions.face_detection
-    mp_draw = mp.solutions.drawing_utils
-    faces = []
-    with mp_face.FaceDetection(model_selection=0, min_detection_confidence=0.5) as fd:
-        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        results = fd.process(rgb)
-        if results.detections:
-            for d in results.detections:
-                bbox = d.location_data.relative_bounding_box
-                h, w, _ = img.shape
-                x, y, bw, bh = int(bbox.xmin * w), int(bbox.ymin * h), int(bbox.width * w), int(bbox.height * h)
-                faces.append((x, y, x+bw, y+bh))
-    return faces
+faceNet = cv2.dnn.readNet(faceModel, faceProto)
+ageNet = cv2.dnn.readNet(ageModel, ageProto)
+genderNet = cv2.dnn.readNet(genderModel, genderProto)
 
-# ---------- Face Analysis Methods ----------
-def analyze_deepface(face_img, backend):
-    res = DeepFace.analyze(face_img, actions=['age', 'gender'], enforce_detection=False, detector_backend=backend)
-    return {"age": res[0]['age'], "gender": res[0]['dominant_gender']}
+# Helper: detect faces
+def highlightFace(net, frame, conf_threshold=0.7):
+    frameOpencvDnn = frame.copy()
+    h, w = frameOpencvDnn.shape[:2]
+    blob = cv2.dnn.blobFromImage(frameOpencvDnn, 1.0, (300, 300),
+                                 [104, 117, 123], True, False)
+    net.setInput(blob)
+    detections = net.forward()
+    faceBoxes = []
+    for i in range(detections.shape[2]):
+        confidence = detections[0,0,i,2]
+        if confidence > conf_threshold:
+            x1 = int(detections[0,0,i,3]*w)
+            y1 = int(detections[0,0,i,4]*h)
+            x2 = int(detections[0,0,i,5]*w)
+            y2 = int(detections[0,0,i,6]*h)
+            faceBoxes.append([x1,y1,x2,y2])
+            cv2.rectangle(frameOpencvDnn, (x1,y1), (x2,y2),
+                          (0,255,0), int(round(h/150)), 8)
+    return frameOpencvDnn, faceBoxes
 
-def analyze_opencv_dnn(face_img):
-    # Pretrained models (downloaded by OpenCV automatically)
-    age_net = cv2.dnn.readNetFromCaffe(
-        'https://raw.githubusercontent.com/opencv/opencv/master/samples/dnn/face_detector/deploy.prototxt',
-        'https://raw.githubusercontent.com/opencv/opencv_3rdparty/master/dnn_models/res10_300x300_ssd_iter_140000.caffemodel'
-    )
-    # Dummy logic as placeholder (OpenCV doesn't have built-in age/gender model here)
-    # You can plug in your age/gender DNN models if available
-    return {"age": "N/A", "gender": "N/A"}
-
-def analyze_insightface(face_img):
-    model = insightface.app.FaceAnalysis(name="buffalo_l")
-    model.prepare(ctx_id=-1)
-    rgb = cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB)
-    faces = model.get(rgb)
-    if len(faces) > 0 and 'age' in faces[0]:
-        return {"age": faces[0]['age'], "gender": faces[0]['gender']}
-    return {"age": "N/A", "gender": "N/A"}
-
-# ---------- Streamlit UI ----------
-st.title("🧠 Face Analysis POC")
-st.write("Detect faces and analyze Age & Gender using multiple detectors/models")
-
+# Streamlit UI
+st.title("🧠 Age & Gender Detection")
 uploaded_file = st.file_uploader("Upload an Image", type=["jpg","jpeg","png"])
 
-face_detector = st.selectbox("Select Face Detection Method", ["OpenCV", "MTCNN", "MediaPipe"])
-analysis_model = st.selectbox("Select Analysis Model", ["DeepFace", "OpenCV-DNN", "InsightFace"])
-
-deepface_backend = None
-if analysis_model == "DeepFace":
-    deepface_backend = st.selectbox(
-        "DeepFace Backend",
-        ["opencv","mtcnn","retinaface","ssd","dlib","mediapipe"]
-    )
-
 if uploaded_file is not None:
-    image = np.array(Image.open(uploaded_file).convert('RGB'))
-    img_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    image = Image.open(uploaded_file).convert('RGB')
+    frame = np.array(image)
+    resultImg, faceBoxes = highlightFace(faceNet, frame)
 
-    # Face Detection
-    if face_detector == "OpenCV":
-        boxes = detect_faces_opencv(img_bgr)
-    elif face_detector == "MTCNN":
-        boxes = detect_faces_mtcnn(image)
+    if not faceBoxes:
+        st.warning("No face detected.")
     else:
-        boxes = detect_faces_mediapipe(img_bgr)
+        padding = 20
+        for faceBox in faceBoxes:
+            face = frame[max(0,faceBox[1]-padding):min(faceBox[3]+padding,frame.shape[0]-1),
+                         max(0,faceBox[0]-padding):min(faceBox[2]+padding, frame.shape[1]-1)]
 
-    st.image(image, caption="Uploaded Image", use_column_width=True)
+            blob = cv2.dnn.blobFromImage(face, 1.0, (227,227),
+                                         MODEL_MEAN_VALUES, swapRB=False)
 
-    if not boxes:
-        st.warning("No faces detected")
-    else:
-        for i, (x1, y1, x2, y2) in enumerate(boxes):
-            face = img_bgr[y1:y2, x1:x2]
-            if face.size == 0: continue
+            genderNet.setInput(blob)
+            genderPreds = genderNet.forward()
+            gender = genderList[genderPreds[0].argmax()]
 
-            if analysis_model == "DeepFace":
-                res = analyze_deepface(face, deepface_backend)
-            elif analysis_model == "OpenCV-DNN":
-                res = analyze_opencv_dnn(face)
-            else:
-                res = analyze_insightface(face)
+            ageNet.setInput(blob)
+            agePreds = ageNet.forward()
+            age = ageList[agePreds[0].argmax()]
 
-            st.subheader(f"Face #{i+1}")
-            st.image(face[...,::-1], width=150)
-            st.write(f"**Age:** {res['age']}")
-            st.write(f"**Gender:** {res['gender']}")
+            label = f"{gender}, {age}"
+            cv2.putText(resultImg, label, (faceBox[0], faceBox[1]-10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,255), 2, cv2.LINE_AA)
+
+        st.image(resultImg, channels="BGR", caption="Predicted Age and Gender")
