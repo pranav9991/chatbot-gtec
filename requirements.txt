@@ -1,67 +1,77 @@
 import streamlit as st
 import cv2
+import dlib
 import numpy as np
 from PIL import Image
-from mtcnn import MTCNN
+import io
 
-# Initialize MTCNN face detector
-detector = MTCNN()
+# ---- Paths to models ----
+AGE_PROTO = "age_deploy.prototxt"
+AGE_MODEL = "age_net.caffemodel"
+GENDER_PROTO = "gender_deploy.prototxt"
+GENDER_MODEL = "gender_net.caffemodel"
+LANDMARK_MODEL = "shape_predictor_68_face_landmarks.dat"
 
-# Heuristic behaviour detection
-def detect_behaviour(eye_img, lip_img):
-    # Eye darkness heuristic
-    eye_gray = cv2.cvtColor(eye_img, cv2.COLOR_BGR2GRAY)
-    eye_darkness = np.mean(eye_gray)
+AGE_BUCKETS = ['(0-2)', '(4-6)', '(8-12)', '(15-20)', '(25-32)', '(38-43)', '(48-53)', '(60-100)']
+GENDER_LIST = ['Male', 'Female']
 
-    # Lip darkness using LAB color space
-    lip_lab = cv2.cvtColor(lip_img, cv2.COLOR_BGR2LAB)
-    L_channel = lip_lab[:, :, 0]  # lightness
-    lip_darkness = np.mean(L_channel)
+@st.cache_resource
+def load_models():
+    detector = dlib.get_frontal_face_detector()
+    predictor = dlib.shape_predictor(LANDMARK_MODEL)
+    age_net = cv2.dnn.readNetFromCaffe(AGE_PROTO, AGE_MODEL)
+    gender_net = cv2.dnn.readNetFromCaffe(GENDER_PROTO, GENDER_MODEL)
+    return detector, predictor, age_net, gender_net
 
-    if lip_darkness < 60:   # darker lips threshold
-        return "Possible Lip Biting / Dark Lips"
-    elif eye_darkness < 60:  # darker eyes
-        return "Possible Eye Rubbing"
-    else:
-        return "No clear behaviour detected"
+def read_image(uploaded_file):
+    image = Image.open(uploaded_file).convert('RGB')
+    return np.array(image)[:, :, ::-1]
 
-# Helper: crop a region around a keypoint
-def crop_region(img, center, size=50):
-    x, y = center
-    x1 = max(0, int(x - size//2))
-    y1 = max(0, int(y - size//2))
-    x2 = min(img.shape[1], int(x + size//2))
-    y2 = min(img.shape[0], int(y + size//2))
-    return img[y1:y2, x1:x2]
+def detect_and_predict(img_bgr, detector, predictor, age_net, gender_net):
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    faces = detector(gray)
+    output = img_bgr.copy()
 
-# Streamlit UI
-st.title("Facial Behaviour Detection (Lip / Eye Analysis)")
-uploaded = st.file_uploader("Upload a face image", type=["jpg", "jpeg", "png"])
+    for face in faces:
+        x1, y1, x2, y2 = face.left(), face.top(), face.right(), face.bottom()
+        face_crop = img_bgr[y1:y2, x1:x2]
 
-if uploaded:
-    image = Image.open(uploaded).convert("RGB")
-    img_np = np.array(image)
-    img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+        # Age/Gender prediction
+        blob = cv2.dnn.blobFromImage(face_crop, 1.0, (227, 227),
+                                     (78.4263, 87.7689, 114.8958), swapRB=False)
+        gender_net.setInput(blob)
+        gender = GENDER_LIST[gender_net.forward()[0].argmax()]
+        age_net.setInput(blob)
+        age = AGE_BUCKETS[age_net.forward()[0].argmax()]
 
-    results = detector.detect_faces(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
-    if not results:
-        st.error("No face detected.")
-    else:
-        # Take the first detected face
-        keypoints = results[0]['keypoints']
-        left_eye = keypoints['left_eye']
-        right_eye = keypoints['right_eye']
-        mouth_left = keypoints['mouth_left']
-        mouth_right = keypoints['mouth_right']
+        # Draw box and label
+        cv2.rectangle(output, (x1,y1), (x2,y2), (0,255,0), 2)
+        cv2.putText(output, f"{gender}, {age}", (x1, y1-10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
 
-        # Crop eyes and lips
-        eye_center = ((left_eye[0] + right_eye[0]) // 2, (left_eye[1] + right_eye[1]) // 2)
-        eyes_crop = crop_region(img_bgr, eye_center, size=60)
+        # Landmarks
+        shape = predictor(gray, face)
+        for i in range(68):
+            x, y = shape.part(i).x, shape.part(i).y
+            cv2.circle(output, (x, y), 1, (0, 0, 255), -1)
 
-        lip_center = ((mouth_left[0] + mouth_right[0]) // 2, (mouth_left[1] + mouth_right[1]) // 2)
-        lips_crop = crop_region(img_bgr, lip_center, size=50)
+    return output
 
-        behaviour = detect_behaviour(eyes_crop, lips_crop)
+def main():
+    st.title("Age & Gender Prediction with Landmarks")
+    detector, predictor, age_net, gender_net = load_models()
 
-        st.image(image, caption="Uploaded Image", use_container_width=True)
-        st.subheader(f"Detected Behaviour: {behaviour}")
+    uploaded = st.file_uploader("Upload a photo", type=["jpg","jpeg","png"])
+    cam = st.camera_input("Or take a photo")
+
+    img = None
+    if uploaded: img = read_image(uploaded)
+    elif cam: img = read_image(io.BytesIO(cam.getvalue()))
+
+    if img is not None:
+        with st.spinner("Processing..."):
+            result = detect_and_predict(img, detector, predictor, age_net, gender_net)
+        st.image(cv2.cvtColor(result, cv2.COLOR_BGR2RGB), use_column_width=True)
+
+if __name__ == "__main__":
+    main()
