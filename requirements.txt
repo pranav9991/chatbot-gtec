@@ -1,43 +1,11 @@
 import streamlit as st
 import cv2
-import dlib
 import numpy as np
 from PIL import Image
-from tensorflow.keras.applications import VGG16
-from tensorflow.keras.applications.vgg16 import preprocess_input
-from tensorflow.keras.preprocessing.image import img_to_array
+from mtcnn import MTCNN
 
-# Initialize models
-face_detector = dlib.get_frontal_face_detector()
-landmark_predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
-vgg = VGG16(weights="imagenet", include_top=False, pooling="avg")
-
-# Helper: extract face landmarks
-def get_landmarks(img_gray):
-    faces = face_detector(img_gray)
-    if len(faces) == 0:
-        return None, None
-    shape = landmark_predictor(img_gray, faces[0])
-    coords = np.array([[p.x, p.y] for p in shape.parts()])
-    return faces[0], coords
-
-# Helper: crop region by landmark indexes
-def crop_region(image, landmarks, idx_list, pad=5):
-    pts = landmarks[idx_list]
-    x1, y1 = np.min(pts, axis=0) - pad
-    x2, y2 = np.max(pts, axis=0) + pad
-    x1, y1 = max(0, x1), max(0, y1)
-    x2, y2 = min(image.shape[1], x2), min(image.shape[0], y2)
-    return image[int(y1):int(y2), int(x1):int(x2)]
-
-# Helper: get VGG16 feature vector (not used yet but ready)
-def extract_features(crop):
-    crop_resized = cv2.resize(crop, (224, 224))
-    x = img_to_array(crop_resized)
-    x = np.expand_dims(x, axis=0)
-    x = preprocess_input(x)
-    features = vgg.predict(x, verbose=0)
-    return features.flatten()
+# Initialize MTCNN face detector
+detector = MTCNN()
 
 # Heuristic behaviour detection
 def detect_behaviour(eye_img, lip_img):
@@ -45,39 +13,55 @@ def detect_behaviour(eye_img, lip_img):
     eye_gray = cv2.cvtColor(eye_img, cv2.COLOR_BGR2GRAY)
     eye_darkness = np.mean(eye_gray)
 
-    # Lip darkness heuristic (lower brightness = darker lips)
-    lip_hsv = cv2.cvtColor(lip_img, cv2.COLOR_BGR2HSV)
-    lip_brightness = np.mean(lip_hsv[:, :, 2])
+    # Lip darkness using LAB color space
+    lip_lab = cv2.cvtColor(lip_img, cv2.COLOR_BGR2LAB)
+    L_channel = lip_lab[:, :, 0]  # lightness
+    lip_darkness = np.mean(L_channel)
 
-    if lip_brightness < 60:  # Threshold for dark lips
-        return "Dark Lips Detected"
-    elif eye_darkness < 60:  # Threshold for dark under eyes
-        return "Eye Rubbing Detected"
+    if lip_darkness < 60:   # darker lips threshold
+        return "Possible Lip Biting / Dark Lips"
+    elif eye_darkness < 60:  # darker eyes
+        return "Possible Eye Rubbing"
     else:
         return "No clear behaviour detected"
 
+# Helper: crop a region around a keypoint
+def crop_region(img, center, size=50):
+    x, y = center
+    x1 = max(0, int(x - size//2))
+    y1 = max(0, int(y - size//2))
+    x2 = min(img.shape[1], int(x + size//2))
+    y2 = min(img.shape[0], int(y + size//2))
+    return img[y1:y2, x1:x2]
+
 # Streamlit UI
-st.title("Facial Behaviour Detection (Dark Lips / Eye Rubbing)")
+st.title("Facial Behaviour Detection (Lip / Eye Analysis)")
 uploaded = st.file_uploader("Upload a face image", type=["jpg", "jpeg", "png"])
 
 if uploaded:
     image = Image.open(uploaded).convert("RGB")
-    image_np = np.array(image)
-    img_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
-    img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    img_np = np.array(image)
+    img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
 
-    face, landmarks = get_landmarks(img_gray)
-    if landmarks is None:
+    results = detector.detect_faces(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
+    if not results:
         st.error("No face detected.")
     else:
-        # Landmark indexes: lips (48-67), eyes (36-47)
-        lips = crop_region(img_bgr, landmarks, list(range(48, 68)))
-        eyes = crop_region(img_bgr, landmarks, list(range(36, 48)))
+        # Take the first detected face
+        keypoints = results[0]['keypoints']
+        left_eye = keypoints['left_eye']
+        right_eye = keypoints['right_eye']
+        mouth_left = keypoints['mouth_left']
+        mouth_right = keypoints['mouth_right']
 
-        behaviour = detect_behaviour(eyes, lips)
+        # Crop eyes and lips
+        eye_center = ((left_eye[0] + right_eye[0]) // 2, (left_eye[1] + right_eye[1]) // 2)
+        eyes_crop = crop_region(img_bgr, eye_center, size=60)
+
+        lip_center = ((mouth_left[0] + mouth_right[0]) // 2, (mouth_left[1] + mouth_right[1]) // 2)
+        lips_crop = crop_region(img_bgr, lip_center, size=50)
+
+        behaviour = detect_behaviour(eyes_crop, lips_crop)
 
         st.image(image, caption="Uploaded Image", use_container_width=True)
         st.subheader(f"Detected Behaviour: {behaviour}")
-
-
-pip install streamlit opencv-python dlib pillow tensorflow
