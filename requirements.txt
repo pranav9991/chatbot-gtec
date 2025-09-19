@@ -4,30 +4,21 @@ import dlib
 import numpy as np
 from PIL import Image
 import io
+from deepface import DeepFace
 
-# ---- Paths to models ----
-AGE_PROTO = "age_deploy.prototxt"
-AGE_MODEL = "age_net.caffemodel"
-GENDER_PROTO = "gender_deploy.prototxt"
-GENDER_MODEL = "gender_net.caffemodel"
 LANDMARK_MODEL = "shape_predictor_68_face_landmarks.dat"
 
-AGE_BUCKETS = ['(0-2)', '(4-6)', '(8-12)', '(15-20)', '(25-32)', '(38-43)', '(48-53)', '(60-100)']
-GENDER_LIST = ['Male', 'Female']
-
 @st.cache_resource
-def load_models():
+def load_dlib_models():
     detector = dlib.get_frontal_face_detector()
     predictor = dlib.shape_predictor(LANDMARK_MODEL)
-    age_net = cv2.dnn.readNetFromCaffe(AGE_PROTO, AGE_MODEL)
-    gender_net = cv2.dnn.readNetFromCaffe(GENDER_PROTO, GENDER_MODEL)
-    return detector, predictor, age_net, gender_net
+    return detector, predictor
 
 def read_image(uploaded_file):
     image = Image.open(uploaded_file).convert('RGB')
     return np.array(image)[:, :, ::-1]
 
-def detect_and_predict(img_bgr, detector, predictor, age_net, gender_net):
+def detect_and_predict(img_bgr, detector, predictor):
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     faces = detector(gray)
     output = img_bgr.copy()
@@ -36,16 +27,15 @@ def detect_and_predict(img_bgr, detector, predictor, age_net, gender_net):
         x1, y1, x2, y2 = face.left(), face.top(), face.right(), face.bottom()
         face_crop = img_bgr[y1:y2, x1:x2]
 
-        # Age/Gender prediction
-        blob = cv2.dnn.blobFromImage(face_crop, 1.0, (227, 227),
-                                     (78.4263, 87.7689, 114.8958), swapRB=False)
-        gender_net.setInput(blob)
-        gender = GENDER_LIST[gender_net.forward()[0].argmax()]
-        age_net.setInput(blob)
-        age = AGE_BUCKETS[age_net.forward()[0].argmax()]
+        try:
+            analysis = DeepFace.analyze(face_crop, actions=['age', 'gender'], enforce_detection=False)
+            age = int(analysis[0]['age'])
+            gender = analysis[0]['dominant_gender'].capitalize()
+        except Exception:
+            age, gender = "?", "?"
 
-        # Draw box and label
-        cv2.rectangle(output, (x1,y1), (x2,y2), (0,255,0), 2)
+        # Draw bounding box and label
+        cv2.rectangle(output, (x1, y1), (x2, y2), (0,255,0), 2)
         cv2.putText(output, f"{gender}, {age}", (x1, y1-10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
 
@@ -58,10 +48,12 @@ def detect_and_predict(img_bgr, detector, predictor, age_net, gender_net):
     return output
 
 def main():
-    st.title("Age & Gender Prediction with Landmarks")
-    detector, predictor, age_net, gender_net = load_models()
+    st.set_page_config(page_title="Age & Gender Prediction", layout="centered")
+    st.title("Age and Gender Prediction (DeepFace + dlib landmarks)")
 
-    uploaded = st.file_uploader("Upload a photo", type=["jpg","jpeg","png"])
+    detector, predictor = load_dlib_models()
+
+    uploaded = st.file_uploader("Upload an image", type=["jpg","jpeg","png"])
     cam = st.camera_input("Or take a photo")
 
     img = None
@@ -69,8 +61,8 @@ def main():
     elif cam: img = read_image(io.BytesIO(cam.getvalue()))
 
     if img is not None:
-        with st.spinner("Processing..."):
-            result = detect_and_predict(img, detector, predictor, age_net, gender_net)
+        with st.spinner("Analyzing..."):
+            result = detect_and_predict(img, detector, predictor)
         st.image(cv2.cvtColor(result, cv2.COLOR_BGR2RGB), use_column_width=True)
 
 if __name__ == "__main__":
