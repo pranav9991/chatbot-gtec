@@ -1,15 +1,11 @@
 from ultralytics import YOLO
 
-# Load a YOLOv8 classification model (pretrained)
-model = YOLO("yolov8n-cls.pt")  # Options: yolov8n-cls.pt, yolov8s-cls.pt, etc.
+model = YOLO("makeup_classification/yolo_cls/weights/best.pt")  # path to best model
 
-# Train
-model.train(
-    data="dataset",   # root folder with train/val
-    epochs=20,
-    imgsz=224,
-    batch=32,
-    lr0=0.001,
-    project="makeup_classification",
-    name="yolo_cls",
-)
+results = model.predict("test.jpg")  # single image or folder
+
+for r in results:
+    print(r.probs)          # probabilities
+    print(r.names)          # class names
+    print(r.probs.top1)     # predicted class index
+    print(r.names[r.probs.top1])  # predicted class label
