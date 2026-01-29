@@ -1,25 +1,26 @@
 from pipecat.processors.base import FrameProcessor
 from pipecat.frames import TextFrame
-from rag.index import load_index
 
-class RAGProcessor(FrameProcessor):
+class KTPromptProcessor(FrameProcessor):
     def __init__(self):
         super().__init__()
-        self.db = load_index()
+        self.used = False
 
     async def process(self, frame, direction):
-        if isinstance(frame, TextFrame):
-            docs = self.db.similarity_search(frame.text, k=5)
-            context = "\n\n".join(
-                f"{d.metadata.get('source', '')}\n{d.page_content}"
-                for d in docs
-            )
-
+        if isinstance(frame, TextFrame) and not self.used:
+            self.used = True
             frame.text = f"""
-Context:
-{context}
+You are a senior software engineer giving KT.
 
-Question:
+Rules:
+- Use ONLY the provided code context
+- Mention filenames and functions
+- Be concise and technical
+- If unsure, say so
+
 {frame.text}
 """
         return frame
+
+    async def on_pipeline_flush(self):
+        self.used = False
