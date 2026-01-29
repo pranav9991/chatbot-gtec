@@ -1,2 +1,52 @@
-https://drive.google.com/file/d/1Fy4v80lAM2ZpFDWk2AuAPCwZKpns6rdz/view?usp=drivesdk
 
+
+
+import asyncio
+from pipecat.pipeline import Pipeline
+from pipecat.transport.audio import AudioTransport
+from pipecat.processors.audio import AudioInputProcessor, AudioOutputProcessor
+from pipecat.processors.audio.vad import SileroVADProcessor
+from pipecat.processors.stt.whisper import WhisperSTTProcessor
+from pipecat.processors.llm.ollama import OllamaLLMProcessor
+from pipecat.processors.tts.piper import PiperTTSProcessor
+
+from processors.interrupt import InterruptProcessor
+from processors.command import CommandProcessor
+from processors.rag import RAGProcessor
+from processors.prompt import KTPromptProcessor
+
+async def main():
+    pipeline = Pipeline([
+        AudioInputProcessor(),
+
+        SileroVADProcessor(
+            speech_threshold=0.6,
+            min_speech_duration=0.3,
+            min_silence_duration=0.5,
+            speech_pad_ms=200
+        ),
+
+        WhisperSTTProcessor(model="base"),
+
+        InterruptProcessor(),
+        CommandProcessor(),
+        RAGProcessor(),
+        KTPromptProcessor(),
+
+        OllamaLLMProcessor(
+            model="phi3",
+            stream=True
+        ),
+
+        PiperTTSProcessor(
+            model="en_US-lessac-medium.onnx"
+        ),
+
+        AudioOutputProcessor(),
+    ])
+
+    transport = AudioTransport()
+    await pipeline.run(transport)
+
+if __name__ == "__main__":
+    asyncio.run(main())
