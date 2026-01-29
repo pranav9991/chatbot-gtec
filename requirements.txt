@@ -1,26 +1,12 @@
-from pipecat.processors.base import FrameProcessor
-from pipecat.frames import TextFrame
+import os
+import shutil
+from git import Repo
+from rag.index import build_index
 
-class KTPromptProcessor(FrameProcessor):
-    def __init__(self):
-        super().__init__()
-        self.used = False
+REPO_DIR = "repo"
 
-    async def process(self, frame, direction):
-        if isinstance(frame, TextFrame) and not self.used:
-            self.used = True
-            frame.text = f"""
-You are a senior software engineer giving KT.
-
-Rules:
-- Use ONLY the provided code context
-- Mention filenames and functions
-- Be concise and technical
-- If unsure, say so
-
-{frame.text}
-"""
-        return frame
-
-    async def on_pipeline_flush(self):
-        self.used = False
+def load_github_repo(url):
+    if os.path.exists(REPO_DIR):
+        shutil.rmtree(REPO_DIR)
+    Repo.clone_from(url, REPO_DIR)
+    build_index(REPO_DIR)
