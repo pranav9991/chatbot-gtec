@@ -1,10 +1,15 @@
-pipecat-ai
-torch
-silero-vad
-openai-whisper
-ollama
-piper-tts
-faiss-cpu
-langchain
-sentence-transformers
-gitpython
+import re
+from pipecat.processors.base import FrameProcessor
+from pipecat.frames import TextFrame
+from rag.github import load_github_repo
+
+class CommandProcessor(FrameProcessor):
+    async def process(self, frame, direction):
+        if not isinstance(frame, TextFrame):
+            return frame
+
+        match = re.search(r"https?://github\.com/\S+", frame.text)
+        if match:
+            load_github_repo(match.group(0))
+            frame.text = "Repository loaded. Ask your questions."
+        return frame
