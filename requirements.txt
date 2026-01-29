@@ -1,12 +1,25 @@
 from pipecat.processors.base import FrameProcessor
 from pipecat.frames import TextFrame
+from rag.index import load_index
 
-INTERRUPTS = {"stop", "cancel", "wait"}
+class RAGProcessor(FrameProcessor):
+    def __init__(self):
+        super().__init__()
+        self.db = load_index()
 
-class InterruptProcessor(FrameProcessor):
     async def process(self, frame, direction):
         if isinstance(frame, TextFrame):
-            if any(word in frame.text.lower() for word in INTERRUPTS):
-                await self.pipeline.flush()
-                return None
+            docs = self.db.similarity_search(frame.text, k=5)
+            context = "\n\n".join(
+                f"{d.metadata.get('source', '')}\n{d.page_content}"
+                for d in docs
+            )
+
+            frame.text = f"""
+Context:
+{context}
+
+Question:
+{frame.text}
+"""
         return frame
